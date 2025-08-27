@@ -70,7 +70,7 @@ def opensearch_indexing(embeddings, chunks, tenant_id, document_type, object_key
             }
                 
     except Exception as opensearch_error:
-        print(f"❌ Error en OpenSearch: {str(opensearch_error)}")
+        print(f"Error en OpenSearch: {str(opensearch_error)}")
         return {
             "success": False,
             "message": f"Error en OpenSearch: {str(opensearch_error)}"
@@ -80,7 +80,6 @@ def opensearch_indexing(embeddings, chunks, tenant_id, document_type, object_key
 def opensearch_query(question_embedding, tenant_id, document_type=None):
 
     try:
-        from helpers.rag_helpers import create_opensearch_client
         
         opensearch_client = create_opensearch_client()
         

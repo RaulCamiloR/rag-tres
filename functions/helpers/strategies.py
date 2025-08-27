@@ -1,5 +1,7 @@
-from helpers.rag_helpers import extract_pdf_text, get_chunks, get_embeddings, get_multimodal_embeddings, analyze_image_with_rekognition
+from helpers.rag_helpers import extract_pdf_text, get_chunks, get_embeddings, get_multimodal_embeddings, analyze_image_with_claude
 from helpers.opensearch_indexing import opensearch_query
+from payloads.payloads import get_payload_for_rag_response
+from prompting.prompts import get_rag_response_prompt
 import boto3
 import json
 from botocore.config import Config
@@ -19,15 +21,14 @@ def pdf_strategy(text):
 
         chunks = get_chunks(text_content, 2000, 200)
 
-        # Usar Titan Multimodal para compatibilidad con imágenes
         embeddings = []
         for chunk in chunks:
             chunk_embedding = get_multimodal_embeddings(
-                base64_image=None,  # Solo texto
+                base64_image=None,
                 input_text=chunk,
                 dimensions=1024
             )
-            embeddings.extend(chunk_embedding)  # get_multimodal_embeddings devuelve lista
+            embeddings.extend(chunk_embedding)
 
         return (chunks, embeddings)
     
@@ -39,45 +40,25 @@ def pdf_strategy(text):
 
 
 def jpg_strategy(file_content, filename="imagen.jpg"):
-    """
-    Procesa imagen JPG usando Rekognition para análisis visual y embeddings multimodales
-    
-    Args:
-        file_content: Contenido binario de la imagen JPG
-        filename: Nombre del archivo para referencia
-    
-    Returns:
-        chunks, embeddings: Tupla con descripción de Rekognition y embeddings multimodales
-    """
 
     try:
-        
-        import base64
-        
-        print(f"🖼️ Procesando imagen: {filename}")
-        
-        # 1. Analizar imagen con Rekognition para obtener descripción textual
-        description = analyze_image_with_rekognition(file_content, filename)
-        
-        # 2. Convertir imagen a base64 para embeddings multimodales  
+
+        description = analyze_image_with_claude(file_content, filename)
+          
         base64_image = base64.b64encode(file_content).decode('utf-8')
-        print(f"📝 Base64 generado: {len(base64_image)} caracteres")
         
-        # 3. Generar embeddings multimodales combinando imagen + descripción textual
         embeddings = get_multimodal_embeddings(
             base64_image=base64_image,
-            input_text=description,  # Combinar imagen con descripción de Rekognition
+            input_text=description,
             dimensions=1024
         )
         
-        # 4. Usar descripción real en lugar de placeholder
-        chunks = [description]  # Descripción textual rica del contenido visual
+        chunks = [description]
         
-        print(f"✅ jpg_strategy completada: imagen analizada → descripción + embedding híbrido")
         return (chunks, embeddings)
         
     except Exception as e:
-        print(f"❌ Error en jpg_strategy: {str(e)}")
+        print(f"Error en jpg_strategy: {str(e)}")
         import traceback
         traceback.print_exc()
         return {
@@ -90,9 +71,8 @@ def query_strategy(question, tenant_id, document_type=None):
 
     try:
 
-        # Usar Titan Multimodal para compatibilidad con imágenes indexadas
         question_embeddings = get_multimodal_embeddings(
-            base64_image=None,  # Solo texto para query
+            base64_image=None,
             input_text=question,
             dimensions=1024
         )
@@ -179,50 +159,10 @@ def generate_llm_response(question, context):
         )
         bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1', config=config)
         
-        system_prompt = """Eres un asistente especializado en responder preguntas basándote únicamente en la información proporcionada en los documentos. 
+        system_prompt, user_prompt = get_rag_response_prompt(question, context)
 
-INSTRUCCIONES:
-- Responde SOLO con información que aparece explícitamente en los documentos
-- Si no hay información suficiente, di claramente "No tengo información suficiente en los documentos proporcionados"
-- Mantén un tono profesional y conciso
-- Cita información específica cuando sea relevante
-- No inventes información que no esté en los documentos"""
-
-        user_prompt = f"""CONTEXTO DE DOCUMENTOS:
-{context}
-
-PREGUNTA DEL USUARIO:
-{question}
-
-RESPUESTA:"""
-
-        # Payload para Amazon Nova Pro (formato messages-v1)
-        payload = {
-            "schemaVersion": "messages-v1",
-            "system": [
-                {
-                    "text": system_prompt
-                }
-            ],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "text": user_prompt
-                        }
-                    ]
-                }
-            ],
-            "inferenceConfig": {
-                "maxTokens": 1000,
-                "temperature": 0.1,
-                "topP": 0.9,
-                "stopSequences": []
-            }
-        }
+        payload = get_payload_for_rag_response(system_prompt, user_prompt)
         
-        # Llamar a Amazon Nova Pro
         response = bedrock_runtime.invoke_model(
             modelId="amazon.nova-pro-v1:0",
             contentType="application/json",
@@ -230,10 +170,8 @@ RESPUESTA:"""
             body=json.dumps(payload)
         )
         
-        # Parsear respuesta
         response_body = json.loads(response['body'].read())
         
-        # Nova Pro retorna la respuesta en formato similar a Claude v3
         output = response_body.get('output', {})
         message = output.get('message', {})
         content = message.get('content', [])

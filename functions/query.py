@@ -43,7 +43,7 @@ def lambda_handler(event, context):
     except json.JSONDecodeError:
         return create_error_response(400, "Invalid JSON in request body")
     except Exception as e:
-        print(f"❌ Error en query RAG: {str(e)}")
+        print(f"Error en query RAG: {str(e)}")
         import traceback
         traceback.print_exc()
         return create_error_response(500, "Error interno en consulta")

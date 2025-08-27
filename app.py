@@ -8,7 +8,7 @@ from nuevorag.nuevorag_stack import NuevoragStack
 
 app = cdk.App()
 
-prefix = "rag-uno"
+prefix = "rag-dos"
 
 rag_stack = NuevoragStack(app, f"{prefix}-first-Stack", stack_variables={
     "prefix": prefix

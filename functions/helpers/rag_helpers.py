@@ -5,11 +5,15 @@ import io
 import os
 import hashlib
 import PyPDF2
+import base64
+from botocore.config import Config
 from typing import List, Tuple, Dict, Optional
 from datetime import datetime
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_aws4auth import AWS4Auth
+from payloads.payloads import get_payload_for_image_analysis
+from prompting.prompts import get_analize_image_prompt, get_image_description, get_image_description_error
 
 
 
@@ -68,7 +72,7 @@ def get_chunks(text_content: str, chunk_size: int, chunk_overlap: int) -> List[s
         return chunks
         
     except Exception as e:
-        print(f"❌ Error generando chunks: {str(e)}")
+        print(f"Error generando chunks: {str(e)}")
         raise ValueError(f"Error en chunking: {str(e)}")
 
 
@@ -171,8 +175,7 @@ def generate_document_hash(tenant_id: str, source_file: str, chunk_index: int, c
 def create_opensearch_client(region: str = 'us-east-1') -> OpenSearch:
 
     try:
-        print(f"🔐 Inicializando cliente OpenSearch para región {region}")
-        
+
         session = boto3.Session()
         credentials = session.get_credentials()
         
@@ -180,7 +183,7 @@ def create_opensearch_client(region: str = 'us-east-1') -> OpenSearch:
             credentials.access_key,
             credentials.secret_key,
             region,
-            'aoss',  # Amazon OpenSearch Serverless
+            'aoss',
             session_token=credentials.token
         )
         
@@ -190,7 +193,6 @@ def create_opensearch_client(region: str = 'us-east-1') -> OpenSearch:
         
         host = opensearch_endpoint
         
-        # Crear cliente
         client = OpenSearch(
             hosts=[{'host': host.replace('https://', ''), 'port': 443}],
             http_auth=awsauth,
@@ -200,11 +202,10 @@ def create_opensearch_client(region: str = 'us-east-1') -> OpenSearch:
             timeout=60
         )
         
-        print(f"✅ Cliente OpenSearch creado exitosamente")
         return client
         
     except Exception as e:
-        print(f"❌ Error creando cliente OpenSearch: {str(e)}")
+        print(f"Error creando cliente OpenSearch: {str(e)}")
         raise ValueError(f"Error en cliente OpenSearch: {str(e)}")
 
 
@@ -375,33 +376,18 @@ def get_multimodal_embeddings(base64_image: str = None, input_text: str = None, 
         
         bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1')
         
-        # Determinar tipo de embedding
-        if base64_image and input_text:
-            print(f"🖼️🔤 Generando embedding multimodal (imagen + texto) - {dimensions} dimensiones")
-        elif base64_image:
-            print(f"🖼️ Generando embedding de imagen - {dimensions} dimensiones")
-        else:
-            print(f"🔤 Generando embedding de texto (modelo multimodal) - {dimensions} dimensiones")
-        
-        # Payload para Titan Multimodal
         payload = {
             "embeddingConfig": {
                 "outputEmbeddingLength": dimensions
             }
         }
         
-        # Agregar imagen si está presente
         if base64_image:
             payload["inputImage"] = base64_image
             
-        # Agregar texto si está presente
         if input_text:
             payload["inputText"] = input_text.strip()
-            if len(input_text) > 50:
-                print(f"📝 Texto: {input_text[:50]}...")
-            else:
-                print(f"📝 Texto: {input_text}")
-        
+      
         response = bedrock_runtime.invoke_model(
             modelId="amazon.titan-embed-image-v1",
             contentType="application/json",
@@ -413,11 +399,11 @@ def get_multimodal_embeddings(base64_image: str = None, input_text: str = None, 
         embedding = response_body.get('embedding', [])
         
         if not embedding:
-            print("❌ Titan Multimodal no devolvió embedding")
+            print("Titan Multimodal no devolvió embedding")
             raise ValueError("No se pudo generar embedding multimodal")
             
-        print(f"✅ Embedding multimodal generado - {len(embedding)} dimensiones")
-        return [embedding]  # Devolver como lista para mantener consistencia
+        print(f"Embedding multimodal generado - {len(embedding)} dimensiones")
+        return [embedding] 
         
     except Exception as e:
         print(f"❌ Error generando embedding multimodal: {str(e)}")
@@ -426,79 +412,62 @@ def get_multimodal_embeddings(base64_image: str = None, input_text: str = None, 
         raise ValueError(f"Error en embedding multimodal: {str(e)}")
 
 
-def analyze_image_with_rekognition(image_bytes: bytes, filename: str = "imagen") -> str:
 
+def analyze_image_with_claude(image_bytes: bytes, filename: str = "imagen") -> str:
+    
     try:
+
+        config = Config(
+            connect_timeout=3600,  # 60 minutos
+            read_timeout=3600,     # 60 minutos
+            retries={'max_attempts': 1}
+        )
+        bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1', config=config)
         
-        rekognition = boto3.client('rekognition', region_name='us-east-1')
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
-        print(f"🔍 Analizando imagen '{filename}' con Rekognition...")
+        file_extension = '.' + filename.split('.')[-1].lower() if '.' in filename else ''
+        media_type_mapping = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg', 
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp'
+        }
+        media_type = media_type_mapping.get(file_extension, 'image/jpeg')
         
-        # 1. Detectar objetos, escenas y conceptos
-        print("📋 Detectando objetos y escenas...")
-        labels_response = rekognition.detect_labels(
-            Image={'Bytes': image_bytes},
-            MaxLabels=20,  # Máximo 20 etiquetas
-            MinConfidence=75.0  # Confianza mínima del 75%
+        system_prompt, user_prompt = get_analize_image_prompt(filename)
+
+        payload = get_payload_for_image_analysis(system_prompt, user_prompt, media_type, base64_image)
+        
+        response = bedrock_runtime.invoke_model(
+            modelId="anthropic.claude-3-5-sonnet-20240620-v1:0",
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(payload)
         )
         
-        # Extraer objetos detectados
-        objects = []
-        for label in labels_response.get('Labels', []):
-            name = label['Name']
-            confidence = label['Confidence']
-            objects.append(f"{name} ({confidence:.0f}%)")
+        response_body = json.loads(response['body'].read())
+        
+        if 'content' in response_body and len(response_body['content']) > 0:
+            description = response_body['content'][0].get('text', '').strip()
             
-        objects_text = ", ".join(objects[:10]) if objects else "No se detectaron objetos específicos"
+            if description:
+                
+                final_description = get_image_description(filename, description)
+                
+                return final_description
         
-        # 2. Extraer texto visible (OCR)
-        print("🔤 Extrayendo texto visible...")
-        try:
-            text_response = rekognition.detect_text(
-                Image={'Bytes': image_bytes}
-            )
+        raise ValueError("Claude no generó descripción válida")
             
-            detected_texts = []
-            for text_detection in text_response.get('TextDetections', []):
-                if text_detection['Type'] == 'LINE':  # Solo líneas completas, no palabras individuales
-                    text = text_detection['DetectedText']
-                    confidence = text_detection['Confidence']
-                    if confidence >= 80.0:  # Solo texto con alta confianza
-                        detected_texts.append(text)
-                        
-            text_content = " | ".join(detected_texts) if detected_texts else "No se detectó texto visible"
-            
-        except Exception as text_error:
-            print(f"⚠️ Error en detección de texto: {str(text_error)}")
-            text_content = "No se pudo analizar texto en la imagen"
-        
-        # 3. Generar descripción completa
-        description = f"""Imagen '{filename}' que contiene:
-
-OBJETOS DETECTADOS: {objects_text}
-
-TEXTO VISIBLE: {text_content}
-
-Esta es una imagen procesada con análisis visual automático que permite hacer consultas sobre su contenido."""
-        
-        print(f"✅ Análisis completado:")
-        print(f"   - Objetos: {len(objects)} detectados")
-        print(f"   - Texto: {'Sí' if detected_texts else 'No'} detectado")
-        
-        return description
-        
     except Exception as e:
-        error_msg = f"Error analizando imagen con Rekognition: {str(e)}"
-        print(f"❌ {error_msg}")
+        error_msg = f"Error analizando imagen con Claude: {str(e)}"
+        print(f"{error_msg}")
+        import traceback
+        traceback.print_exc()
+
+        final_description_error = get_image_description_error(e, filename)
         
-        # Descripción de fallback
-        return f"""Imagen '{filename}' (Error en análisis automático):
-
-CONTENIDO: Imagen subida al sistema pero no se pudo analizar automáticamente.
-
-ERROR: {str(e)}
-
-Esta imagen está indexada y puede ser encontrada por búsquedas semánticas."""
-
+        return final_description_error
 
 
